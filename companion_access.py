@@ -1,17 +1,13 @@
 import base64
 import hashlib
 import json
-import re
 import secrets
 import threading
 import time
-import urllib.error
-import urllib.request
 
-VERIFY_URL = 'https://eclipse-keys.riftex.workers.dev/verify'
+TOKEN_KEY = bytes.fromhex('1b272f05e1e0fc6d43f8b86cf8f1e9c1a14a1fd7c7ef0304508e308735b5ba0b')
+TOKEN_SKEW = 600
 LIFETIME = 1800
-TICKET_KEY = bytes.fromhex('1b272f05e1e0fc6d43f8b86cf8f1e9c1a14a1fd7c7ef0304508e308735b5ba0b')
-TICKET_SKEW = 86400
 
 P = 2**255-19
 Q = 2**252+27742317777372353535851937790883648493
@@ -21,74 +17,6 @@ ROOT = pow(2, (P-1)//4, P)
 
 class AccessError(ValueError):
     pass
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, fp, code, msg, headers, newurl):
-        raise AccessError('Activation verification redirected unexpectedly.')
-
-
-REASONS = {
-    'not_activated': 'This activation was removed. Activate Eclipse again in Studio.',
-    'key_locked_to_other_user': 'Eclipse activation belongs to another Roblox account.',
-    'bad_request': 'The saved Eclipse activation is invalid. Activate Eclipse again in Studio.',
-    'invalid_token': 'The saved Eclipse activation expired or is invalid. Activate Eclipse again in Studio.',
-}
-
-
-def verify_receipt(token, user_id):
-    body = json.dumps({'token': token, 'userId': user_id}).encode()
-    request = urllib.request.Request(VERIFY_URL, data=body, headers={
-        'Content-Type': 'application/json', 'Accept': 'application/json',
-        'User-Agent': 'Eclipse-Companion-Access/2'})
-    for attempt in range(2):
-        try:
-            try:
-                response = urllib.request.build_opener(NoRedirect()).open(request, timeout=12)
-            except urllib.error.HTTPError as exc:
-                response = exc
-            with response:
-                status = response.code
-                payload = response.read(16385)
-            if len(payload) > 16384:
-                raise AccessError('Activation server returned an oversized response. Retry later.')
-            try:
-                result = json.loads(payload)
-            except (ValueError, UnicodeError):
-                result = None
-            if isinstance(result, dict) and result.get('ok') is True and status == 200:
-                return
-            reason = result.get('error') if isinstance(result, dict) else None
-            if isinstance(reason, str) and reason in REASONS:
-                raise AccessError(REASONS[reason])
-            if status == 429:
-                raise AccessError('Activation server is busy (HTTP 429). Wait a minute; Eclipse will retry.')
-            if status >= 500:
-                if attempt == 0:
-                    time.sleep(.5)
-                    continue
-                raise AccessError(f'Activation server is temporarily unavailable (HTTP {status}). Eclipse will retry.')
-            if status in (401, 403):
-                raise AccessError(f'Activation request was rejected (HTTP {status}). Reopen the official plugin and check its activation; if it works there, report this code.')
-            raise AccessError(f'Activation server returned an invalid response (HTTP {status}). Update the companion and retry.')
-        except AccessError:
-            raise
-        except (OSError, ValueError, urllib.error.URLError) as exc:
-            import ssl
-            import socket
-            reason = getattr(exc, 'reason', exc)
-            if isinstance(reason, ssl.SSLCertVerificationError):
-                raise AccessError('Activation connection failed certificate verification. Check the Windows date and trusted certificates; HTTPS verification is required.') from None
-            if attempt == 0:
-                time.sleep(.5)
-                continue
-            if isinstance(reason, (TimeoutError, socket.timeout)):
-                detail = 'timed out'
-            elif isinstance(reason, socket.gaierror):
-                detail = 'could not resolve the activation server (DNS)'
-            else:
-                detail = 'could not reach the activation server'
-            raise AccessError(f'Eclipse Video {detail}. Check its firewall/proxy connection; Eclipse will retry.') from None
 
 
 def _point_add(a, b):
@@ -156,40 +84,41 @@ def _unpad(text):
     return base64.urlsafe_b64decode(text+'='*(-len(text) % 4))
 
 
-def verify_ticket(ticket, user_id, now=None):
-    if not isinstance(ticket, str) or len(ticket) > 512:
-        raise AccessError('Companion ticket is invalid.')
-    parts = ticket.split('.')
+def verify_build_token(token, now=None):
+    if not isinstance(token, str) or len(token) > 512:
+        raise AccessError('Update to the latest build of Eclipse Animator to continue.')
+    parts = token.split('.')
     if len(parts) != 3 or parts[0] != 'v1':
-        raise AccessError('Companion ticket is invalid.')
+        raise AccessError('Update to the latest build of Eclipse Animator to continue.')
     try:
         payload = json.loads(_unpad(parts[1]))
         signature = _unpad(parts[2])
     except (ValueError, UnicodeError):
-        raise AccessError('Companion ticket is invalid.') from None
-    if not ed25519_verify(TICKET_KEY, (parts[0]+'.'+parts[1]).encode(), signature):
-        raise AccessError('Companion ticket signature is invalid.')
-    if not isinstance(payload, dict) or payload.get('v') != 1 or payload.get('u') != user_id:
-        raise AccessError('Companion ticket belongs to another Roblox account.')
+        raise AccessError('Update to the latest build of Eclipse Animator to continue.') from None
+    if not ed25519_verify(TOKEN_KEY, (parts[0]+'.'+parts[1]).encode(), signature):
+        raise AccessError('This Eclipse Animator build could not be verified. Reinstall the latest version.')
+    if not isinstance(payload, dict) or payload.get('v') != 1:
+        raise AccessError('This Eclipse Animator build could not be verified. Reinstall the latest version.')
+    build = payload.get('b')
+    if isinstance(build, bool) or not isinstance(build, int):
+        raise AccessError('This Eclipse Animator build could not be verified. Reinstall the latest version.')
     expires = payload.get('e')
     if isinstance(expires, bool) or not isinstance(expires, (int, float)):
-        raise AccessError('Companion ticket is invalid.')
-    if (time.time() if now is None else now) > expires+TICKET_SKEW:
-        raise AccessError('Companion ticket expired.')
+        raise AccessError('This Eclipse Animator build could not be verified. Reinstall the latest version.')
+    if (time.time() if now is None else now) > expires+TOKEN_SKEW:
+        raise AccessError('Update to the latest build of Eclipse Animator to continue.')
+    return build
 
 
 class AccessGate:
-    def __init__(self, verify=verify_receipt, clock=time.monotonic):
-        self._verify = verify
+    def __init__(self, clock=time.monotonic):
         self._clock = clock
         self._lock = threading.Lock()
         self._grants = {}
-        self._attempts = []
         self.last_error = ''
 
     def _prune(self, now):
         self._grants = {ticket: row for ticket, row in self._grants.items() if row[0] > now}
-        self._attempts = [at for at in self._attempts if now - at < 60]
 
     def authorize(self, data):
         try:
@@ -210,34 +139,10 @@ class AccessGate:
         return {'ticket': ticket, 'expiresIn': LIFETIME}
 
     def _authorize(self, data):
-        account = data.get('userId') if isinstance(data, dict) else None
-        signed = data.get('ticket') if isinstance(data, dict) else None
-        ticket_error = None
-        if isinstance(signed, str) and signed and not isinstance(account, bool) and isinstance(account, int) and 0 < account < 2**53:
-            try:
-                verify_ticket(signed, account)
-                with self._lock:
-                    return self._grant(hashlib.sha256(signed.encode()).digest(), self._clock())
-            except AccessError as error:
-                ticket_error = error
-        receipt = data.get('receipt') if isinstance(data, dict) else None
-        if not isinstance(receipt, str) or len(receipt) > 1024:
-            raise ticket_error or AccessError('Update and activate the official Eclipse plugin, then reconnect.')
-        match = re.fullmatch(r'([0-9a-fA-F]{1,512}):([0-9]{1,16}):[0-9]{1,16}', receipt)
-        if not match or isinstance(account, bool) or not isinstance(account, int) or not 0 < account < 2**53 or account != int(match[2]):
-            raise AccessError('Eclipse activation does not match this Roblox account.')
-        fingerprint = hashlib.sha256(receipt.encode()).digest()
+        token = data.get('token') if isinstance(data, dict) else None
+        verify_build_token(token)
         with self._lock:
-            now = self._clock()
-            self._prune(now)
-            for ticket, (expires, known) in self._grants.items():
-                if secrets.compare_digest(known, fingerprint) and expires - now > 60:
-                    return {'ticket': ticket, 'expiresIn': int(expires - now)}
-            if len(self._attempts) >= 6:
-                raise AccessError('Too many activation checks. Wait a minute and reconnect.')
-            self._attempts.append(now)
-            self._verify(match[1], account)
-            return self._grant(fingerprint, self._clock())
+            return self._grant(hashlib.sha256(token.encode()).digest(), self._clock())
 
     def allowed(self, ticket):
         if not isinstance(ticket, str) or len(ticket) > 128:
@@ -248,4 +153,3 @@ class AccessGate:
     def clear(self):
         with self._lock:
             self._grants.clear()
-            self._attempts.clear()
