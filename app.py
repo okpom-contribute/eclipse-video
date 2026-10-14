@@ -15,7 +15,7 @@ from bridge import Bridge, PORT
 from sync import finite, palette, target_ms
 from updater import Updater
 
-VERSION = '1.7.7'
+VERSION = '1.7.9'
 
 ROOT = Path(__file__).resolve().parent
 MAC = sys.platform == 'darwin'
@@ -706,12 +706,8 @@ class Player(QMainWindow):
         self.show_access_state()
 
     def show_access_state(self):
-        connected = bool(self.dot.property('connected'))
-        problem = '' if connected or not hasattr(self, 'bridge') else self.bridge.access.last_error
-        self.state.setText('Connected' if connected else 'Activation failed' if problem else 'Not connected')
-        self.state.setToolTip(problem)
-        self.state.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not problem)
-        self.dot.setToolTip(problem or self.state.text())
+        self.state.setText('Connected' if self.dot.property('connected') else 'Not connected')
+        self.dot.setToolTip(self.state.text())
 
     def show_filename(self):
         name = self.media_path.name if self.media_path else ''
@@ -1289,11 +1285,8 @@ class Player(QMainWindow):
             self.media.pause()
             self.save()
         self.set_connected(bool(self.owner))
-        problem = '' if self.owner else self.bridge.access.last_error
-        if problem != self.state.toolTip():
-            self.show_access_state()
         self.filename.setToolTip(self.media_error or (str(self.media_path) if self.media_path else 'No video'))
-        problem = self.media_error or ('' if self.owner else self.bridge.access.last_error)
+        problem = self.media_error
         if self.canvas.error != problem:
             self.canvas.error = problem
             self.canvas.update()
