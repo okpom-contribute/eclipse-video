@@ -291,6 +291,15 @@ class Player(QMainWindow):
         self.last_correction = 0.0
         self.last_target = 0.0
         self.last_drift = 0.0
+        self.seek_latency = 150.0
+        self.seek_check = False
+        self.drift_since = None
+        self.drift_smooth = 0.0
+        self.drift_at = 0.0
+        self.rate_at = 0.0
+        self.correcting = False
+        self.last_tick = 0.0
+        self.settle_until = 0.0
         self.media_path = None
         self.prepared = False
         self.media_error = ''
@@ -823,6 +832,13 @@ class Player(QMainWindow):
         self.media_error = ''
         self.frames.clear()
         self.frame_ms = self.displayed_ms = self.last_target = self.last_drift = 0.0
+        self.seek_latency = 150.0
+        self.seek_check = False
+        self.drift_since = None
+        self.drift_smooth = 0.0
+        self.drift_at = 0.0
+        self.rate_at = 0.0
+        self.correcting = False
         self.frame_received = 0.0
         self.last_correction = time.perf_counter()
         self.played_at = self.first_frame_at = self.scheduled_at = None
@@ -1257,6 +1273,9 @@ class Player(QMainWindow):
 
     def step_clock(self):
         now = time.perf_counter()
+        if now-self.last_tick > .05:
+            self.settle_until = now+.25
+        self.last_tick = now
         linked = self.following()
         interval = 1 if linked and (self.deadline is not None or self.remote.get('playing')) else 16
         if self.timer.interval() != interval:
@@ -1332,17 +1351,42 @@ class Player(QMainWindow):
         # keep the decoder about a frame ahead so the frame for each tick is already buffered
         lead = min(20, period)
         self.last_drift = target+lead-actual
+        if self.seek_check and fresh:
+            self.seek_check = False
+            self.seek_latency = min(1500.0, max(0.0, self.seek_latency+self.last_drift*.8))
+        self.drift_smooth += (self.last_drift-self.drift_smooth)*min(1.0, max(0.0, now-self.drift_at)/.3)
+        self.drift_at = now
         threshold = max(90, 2000/state['fps'])
         wrapped = target < self.last_target-50
-        if (wrapped or abs(self.last_drift)>threshold) and now-self.last_correction>.5:
+        if now < self.settle_until and not wrapped:
+            self.drift_since = None
+            self.last_target = target
+            return
+        if self.last_drift > threshold or self.last_drift < -max(400, threshold*4):
+            self.drift_since = self.drift_since or now
+        else:
+            self.drift_since = None
+        held = self.drift_since is not None and now-self.drift_since > .25
+        if (wrapped or held or abs(self.last_drift) > 1000) and now-self.last_correction>.5:
             self.frames.clear()
-            self.media.setPosition(round(target))
+            self.media.setPosition(round(min(self.media.duration(), target+self.seek_latency)))
             self.last_correction = now
-        elif now-self.last_correction>.2:
+            self.seek_check = True
+            self.drift_since = None
+            self.drift_smooth = 0.0
+            self.correcting = False
+        elif now-self.last_correction>.2 and now-self.rate_at>.25:
             audible = self.media.hasAudio() and not self.audio.isMuted() and self.audio.volume() > 0
-            rate = self.speed.value() if audible else self.speed.value()*(1+max(-.06,min(.06,self.last_drift/500)))
-            if abs(rate-self.media.playbackRate())>(.0001 if audible else .002):
+            limit, gain = (.04, 1500) if audible else (.06, 500)
+            if abs(self.drift_smooth) > 25:
+                self.correcting = True
+            elif abs(self.drift_smooth) < 6:
+                self.correcting = False
+            adjust = max(-limit, min(limit, self.drift_smooth/gain)) if self.correcting else 0.0
+            rate = self.speed.value()*(1+adjust)
+            if abs(rate-self.media.playbackRate()) > (.004 if audible else .002) or (adjust == 0 and rate != self.media.playbackRate()):
                 self.media.setPlaybackRate(rate)
+                self.rate_at = now
         self.last_target = target
 
     def closeEvent(self, event):
