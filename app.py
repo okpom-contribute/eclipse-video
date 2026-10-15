@@ -15,7 +15,7 @@ from bridge import Bridge, PORT
 from sync import finite, palette, target_ms
 from updater import Updater
 
-VERSION = '1.7.9'
+VERSION = '1.7.10'
 
 ROOT = Path(__file__).resolve().parent
 MAC = sys.platform == 'darwin'
@@ -285,7 +285,7 @@ class Player(QMainWindow):
         self.arm_until = 0
         self.frame_ms = 0.0
         self.frame_received = 0.0
-        self.frames = deque(maxlen=48)
+        self.frames = deque(maxlen=12)
         self.startup_ms = finite(self.settings.get('startupMs'), 40, 0, 150)
         self.displayed_ms = 0.0
         self.last_correction = 0.0
@@ -870,9 +870,6 @@ class Player(QMainWindow):
     def frame(self, frame):
         if not frame.isValid():
             return
-        image = frame.toImage()
-        if image.isNull():
-            return
         self.frame_ms = frame.startTime()/1000 if frame.startTime() >= 0 else self.media.position()
         self.frame_received = time.perf_counter()
         if self.played_at and not self.first_frame_at:
@@ -880,9 +877,9 @@ class Player(QMainWindow):
             self.learn_startup((self.first_frame_at-self.played_at)*1000)
             self.metrics.append({'scheduled': self.scheduled_at, 'played': self.played_at, 'firstFrame': self.first_frame_at, 'frameMs': self.frame_ms})
         if self.following() and self.remote.get('playing') and self.media.isPlaying():
-            self.frames.append((self.frame_ms, image))
+            self.frames.append((self.frame_ms, frame))
             return
-        self.present(self.frame_ms, image)
+        self.present(self.frame_ms, frame)
 
     def learn_startup(self, measured):
         # decoder wake-up time is stable per machine; keep a smoothed estimate to pre-roll the next start
@@ -893,7 +890,10 @@ class Player(QMainWindow):
     def frame_period(self):
         return 1000/float(self.media.metaData().value(QMediaMetaData.Key.VideoFrameRate) or 30)
 
-    def present(self, position, image):
+    def present(self, position, frame):
+        image = frame.toImage()
+        if image.isNull():
+            return
         self.displayed_ms = position
         self.canvas.image = image
         self.canvas.update()
