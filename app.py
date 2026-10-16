@@ -15,7 +15,8 @@ from bridge import Bridge, PORT
 from sync import finite, palette, target_ms
 from updater import Updater
 
-VERSION = '1.7.10'
+VERSION = '1.7.11'
+SESSION_TIMEOUT = 10.0
 
 ROOT = Path(__file__).resolve().parent
 MAC = sys.platform == 'darwin'
@@ -962,7 +963,7 @@ class Player(QMainWindow):
                 self.play.setText(text)
 
     def following(self):
-        return bool(self.sync.isChecked() and self.owner and self.remote and time.perf_counter()-self.last_message < 3)
+        return bool(self.sync.isChecked() and self.owner and self.remote and time.perf_counter()-self.last_message < SESSION_TIMEOUT)
 
     def toggle_play(self):
         if not self.prepared:
@@ -1152,6 +1153,8 @@ class Player(QMainWindow):
         return {'alwaysOnTop': self.always_on_top, 'connected': bool(self.owner), 'ready': self.prepared, 'file': self.media_path.name if self.media_path else '', 'positionMs': self.media.position(), 'frameMs': self.frame_ms, 'displayedMs': self.displayed_ms, 'playing': self.media.isPlaying(), 'driftMs': round(self.last_drift, 2), 'scheduledAt': self.scheduled_at, 'playedAt': self.played_at, 'firstFrameAt': self.first_frame_at, 'sync': self.sync.isChecked(), 'delayMs': self.offset.value(), 'speed': self.speed.value(), 'volume': self.volume.value(), 'muted': self.mute.isChecked(), 'control': self.control}
 
     def command(self, request):
+        if request.done.is_set():
+            return
         try:
             self.handle(request)
         except Exception as error:
@@ -1168,7 +1171,7 @@ class Player(QMainWindow):
             return request.finish({'error': 'invalid session'})
         # a plugin whose editor is open takes over from one that is only idling in another Studio window
         active = action in {'state', 'arm', 'start', 'stop'} and bool(data.get('controllable', True))
-        if self.owner and self.owner != session and now-self.last_message < 3 and (self.owner_active or not active):
+        if self.owner and self.owner != session and now-self.last_message < SESSION_TIMEOUT and (self.owner_active or not active):
             return request.finish({'error': 'another Eclipse session is connected'})
         if self.owner != session:
             self.seq = -1
@@ -1254,7 +1257,8 @@ class Player(QMainWindow):
             return
         video_fps = float(self.media.metaData().value(QMediaMetaData.Key.VideoFrameRate) or 30)
         tolerance = max(1000/video_fps, 1000/(self.remote or {}).get('fps', 30))+2
-        ready = abs(self.frame_ms-self.arm_target) <= tolerance
+        position = self.frame_ms if self.media.hasVideo() else self.media.position()
+        ready = abs(position-self.arm_target) <= tolerance
         if ready or now >= self.arm_until:
             request, self.arm_request = self.arm_request, None
             result = self.snapshot()
@@ -1277,7 +1281,7 @@ class Player(QMainWindow):
         if self.timer.interval() != interval:
             self.timer.setInterval(interval)
         self.finish_arm(now)
-        if self.owner and now-self.last_message >= 3:
+        if self.owner and now-self.last_message >= SESSION_TIMEOUT:
             self.deadline = None
             self.remote = None
             self.owner = None
